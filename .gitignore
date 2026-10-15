@@ -1,0 +1,21 @@
+# 依赖与产物（项目本身零依赖）
+node_modules/
+
+# 本地数据：笔记都在这里，不要提交
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 自检产生的临时目录
+.ui-check-profile/
+
+# 自检时临时放进 public/ 的探针页
+public/__ui-probe.html
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>UI 交互探测</title>
+<style>
+  body { margin: 0; font: 13px/1.6 monospace; }
+  #probe { padding: 10px; white-space: pre-wrap; }
+  iframe { width: 1200px; height: 820px; border: 0; display: block; }
+</style>
+</head>
+<body>
+<div id="probe">RUNNING</div>
+<iframe id="app" src="/"></iframe>
+<script>
+/*
+ * 这个页面只是自检用的探针（不会被真正部署使用）：
+ * 它在同源 iframe 里把系统完整加载一遍，然后检查
+ *   1. 该隐藏的东西（弹窗遮罩、批量操作条）是不是真的不可见
+ *   2. 关键控件能不能被鼠标点到 —— 用 elementFromPoint 命中测试，
+ *      一旦有透明遮罩盖在上面就会立刻暴露
+ *   3. 真实点击能不能触发交互（点「编辑」是否能弹出弹窗）
+ * 结果写回自己的 DOM，外层用 --dump-dom 抓取。
+ */
+(function () {
+  var results = [];
+
+  function log(name, ok, detail) {
+    /* 结果是用制表符分列、换行分行传出去的，所以要把内容里的空白压平，
+       否则一条带换行的错误信息会把后面的解析全带偏。 */
+    var clean = function (s) { return String(s == null ? '' : s).replace(/[\r\n\t]+/g, ' ').trim(); };
+    results.push((ok ? 'PASS' : 'FAIL') + '\t' + clean(name) + (detail ? '\t' + clean(detail) : ''));
+  }
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  function visible(win, el) {
+    if (!el) return false;
+    var cs = win.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1;
+  }
+
+  function describe(el) {
+    if (!el) return 'null';
+    return el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).trim().split(/\s+/).join('.') : '');
+  }
+
+  window.addEventListener('load', function () {
+    var frame = document.getElementById('app');
+
+    setTimeout(async function () {
+      var doc, win;
+      try {
+        doc = frame.contentDocument;
+        win = frame.contentWindow;
+      } catch (e) {
+        log('探测执行', false, '无法访问 iframe：' + e.message);
+        return finish();
+      }
+
+      try {
+        /* ---------- 1. 该隐藏的必须真的隐藏 ---------- */
+        var modal = doc.getElementById('modal-host');
+        var modalCs = modal ? win.getComputedStyle(modal) : null;
+        log('关闭状态下 #modal-host 不可见', modal ? !visible(win, modal) : false,
+          modal ? 'display=' + modalCs.display + ' backdrop-filter=' + (modalCs.backdropFilter || 'none') : '元素不存在');
+
+        var selBar = doc.getElementById('selection-bar');
+        log('未选中时 #selection-bar 不可见', selBar ? !visible(win, selBar) : false,
+          selBar ? 'display=' + win.getComputedStyle(selBar).display : '元素不存在');
+
+        /* ---------- 2. 关键控件命中测试 ---------- */
+        var targets = [
+          ['搜索框', doc.getElementById('search')],
+          ['导航：记录与浏览', doc.querySelectorAll('#nav .nav-btn')[0]],
+          ['导航：主题分析', doc.querySelectorAll('#nav .nav-btn')[1]],
+          ['导航：时间轴', doc.querySelectorAll('#nav .nav-btn')[2]],
+          ['导航：标签管理', doc.querySelectorAll('#nav .nav-btn')[3]],
+          ['导航：设置', doc.querySelectorAll('#nav .nav-btn')[4]],
+          ['侧栏：全部笔记', doc.querySelector('#sidebar .sb-item')],
+          ['侧栏：一个主题标签', doc.querySelectorAll('#sidebar .sb-item')[5]],
+          ['记录台输入框', doc.querySelector('.capture-input')],
+          ['「全部保存」按钮', doc.querySelector('[data-act="save-all"]')],
+          ['解析模式下拉框', doc.querySelector('[data-act="mode"]')]
+        ];
+
+        for (var i = 0; i < targets.length; i++) {
+          var name = targets[i][0];
+          var el = targets[i][1];
+          if (!el) { log(name + '：元素存在', false, 'DOM 里找不到'); continue; }
+          var r = el.getBoundingClientRect();
+          if (r.width < 1 || r.height < 1) { log(name + '：可见', false, '尺寸为 0'); continue; }
+          var hit = doc.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          var ok = hit === el || el.contains(hit) || (hit && hit.contains(el));
+          log(name + '：可以用鼠标点到', ok, ok ? '' : '被 ' + describe(hit) + ' 挡住了');
+        }
+
+        /* ---------- 3. 真实点击能触发交互 ---------- */
+        var editBtn = doc.querySelector('.note-card [data-act="edit"]');
+        if (editBtn) {
+          editBtn.click();
+          await sleep(350);
+          var opened = modal && !modal.hidden;
+          log('点击「编辑」能弹出弹窗', opened, opened ? '' : '弹窗没有打开');
+          if (opened) {
+            var saveBtn = modal.querySelector('.modal-card .btn');
+            var hitSave = false;
+            if (saveBtn) {
+              var sr = saveBtn.getBoundingClientRect();
+              var hitEl = doc.elementFromPoint(sr.left + sr.width / 2, sr.top + sr.height / 2);
+              hitSave = hitEl === saveBtn || saveBtn.contains(hitEl);
+            }
+            log('弹窗里的按钮可以点到', hitSave, hitSave ? '' : '被遮住了');
+
+            /* 编辑弹窗里的「主题」「类型」必须是自由输入框，不能是下拉单选 */
+            var mTopic = modal.querySelector('.modal-card [data-f="topic"]');
+            var mKind = modal.querySelector('.modal-card [data-f="kind"]');
+            log('弹窗里「主题」是可输入的文本框', mTopic && mTopic.tagName === 'INPUT',
+              mTopic ? mTopic.tagName.toLowerCase() : '找不到该字段');
+            log('弹窗里「类型」是可输入的文本框（不是下拉单选）', mKind && mKind.tagName === 'INPUT',
+              mKind ? mKind.tagName.toLowerCase() : '找不到该字段');
+            log('「类型」输入框带候选提示（可以随便填别的）', !!(mKind && mKind.getAttribute('list')),
+              mKind ? 'list=' + mKind.getAttribute('list') : '');
+            var mTopicLabel = mTopic && mTopic.closest('.field') ? mTopic.closest('.field').querySelector('label') : null;
+            log('弹窗里的字段叫「主题」而不是「来源」',
+              !!mTopicLabel && mTopicLabel.textContent.trim() === '主题',
+              mTopicLabel ? mTopicLabel.textContent.trim() : '找不到标签');
+            log('弹窗里已经没有「来源」字样', modal.textContent.indexOf('来源') === -1,
+              modal.textContent.indexOf('来源') === -1 ? '' : '仍然出现了「来源」');
+
+            doc.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            await sleep(250);
+            log('按 Esc 能关掉弹窗', modal.hidden === true, modal.hidden ? '' : '弹窗还在');
+          }
+        } else {
+          log('笔记卡片上存在「编辑」按钮', false, '数据库里可能没有笔记');
+        }
+
+        /* ---------- 4. 走一遍真实的录入流程：粘贴 → 预览 → 字段可自由编辑 ---------- */
+        var ta = doc.querySelector('.capture-input');
+        if (!ta) {
+          log('记录台粘贴框存在', false, '找不到 .capture-input');
+        } else {
+          ta.value = '《反脆弱》 P61\n摘录：风会熄灭蜡烛，却能使火越烧越旺。\n主题：不确定性\n类型：金句';
+          ta.dispatchEvent(new win.Event('input', { bubbles: true }));
+          await sleep(1600);   // 预览有 300ms 防抖，再留出请求时间
+
+          var card = doc.querySelector('.preview-card');
+          log('粘贴后出现预览卡片', !!card, card ? '' : '预览没有渲染出来');
+          if (card) {
+            var pTopic = card.querySelector('[data-f="topic"]');
+            var pKind = card.querySelector('[data-f="kind"]');
+            log('预览里「主题」是可输入的文本框', pTopic && pTopic.tagName === 'INPUT',
+              pTopic ? pTopic.tagName.toLowerCase() : '找不到该字段');
+            log('预览里「类型」是可输入的文本框（不是下拉单选）', pKind && pKind.tagName === 'INPUT',
+              pKind ? pKind.tagName.toLowerCase() : '找不到该字段');
+            log('粘贴里的「类型：金句」被识别成自定义类型', !!pKind && pKind.value === '金句',
+              pKind ? '实际值 ' + JSON.stringify(pKind.value) : '');
+            log('粘贴里的「主题：不确定性」被填进主题', !!pTopic && pTopic.value === '不确定性',
+              pTopic ? '实际值 ' + JSON.stringify(pTopic.value) : '');
+
+            /* 真的把类型改成自己造的词，看能不能落进数据里 */
+            pKind.value = '案例复盘';
+            pKind.dispatchEvent(new win.Event('change', { bubbles: true }));
+            await sleep(120);
+            log('类型可以随手改成任意文字', pKind.value === '案例复盘', '现在是 ' + JSON.stringify(pKind.value));
+
+            log('预览里没有「来源」字样', card.textContent.indexOf('来源') === -1,
+              card.textContent.indexOf('来源') === -1 ? '' : '仍然出现了「来源」');
+          }
+          ta.value = '';
+          ta.dispatchEvent(new win.Event('input', { bubbles: true }));
+        }
+
+        /* ---------- 5. 图文一起：卡片上的图 + 截图粘贴 ---------- */
+
+        /* 5a. 库里若已有一条带图的笔记，卡片上应该真的把图显示出来 */
+        var cardImg = doc.querySelector('.note-card .note-body img');
+        if (cardImg) {
+          await sleep(400);
+          log('笔记卡片里的图片能真的加载出来', cardImg.naturalWidth > 0,
+            'naturalWidth=' + cardImg.naturalWidth);
+          cardImg.click();
+          await sleep(360);
+          var lbImg = doc.querySelector('#modal-host .image-preview img');
+          log('点图片能弹出大图看细节', !!lbImg, lbImg ? '' : '没有弹出大图');
+          doc.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(240);
+          log('大图按 Esc 能关掉', modal.hidden === true, modal.hidden ? '' : '还开着');
+        } else {
+          log('笔记卡片里应能看到图片', false,
+            '没找到 .note-body img（自检库里需要一条带图的笔记，用 SEED_IMAGE=1 启动自检）');
+        }
+
+        /* 5b. 模拟「截图 → 在输入框里 Ctrl+V」：图文一起进去 */
+        var ta2 = doc.querySelector('.capture-input');
+        var PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+        function pngFile(name) {
+          var bin = win.atob(PNG_B64);
+          var arr = new Uint8Array(bin.length);
+          for (var k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+          return new win.File([arr], name, { type: 'image/png' });
+        }
+
+        if (ta2) {
+          ta2.focus();
+          ta2.value = '这张图是调度流程：';
+          ta2.setSelectionRange(ta2.value.length, ta2.value.length);
+          try {
+            var dt = new win.DataTransfer();
+            dt.items.add(pngFile('截图.png'));
+            var pasteEv = new win.ClipboardEvent('paste', {
+              clipboardData: dt, bubbles: true, cancelable: true,
+            });
+            ta2.dispatchEvent(pasteEv);
+            await sleep(1600);   // 上传 + 预览防抖
+
+            var val = ta2.value;
+            var mark = val.match(/!\[[^\]]*\]\((\/api\/attachments\/[A-Za-z0-9_-]+)\)/);
+            log('粘贴截图后正文里出现了图片标记', !!mark, JSON.stringify(val.slice(0, 140)));
+            log('原来的文字还在（图文一起留着）', val.indexOf('这张图是调度流程：') !== -1, JSON.stringify(val.slice(0, 60)));
+
+            if (mark) {
+              var resp = await win.fetch(mark[1]);
+              log('图片确实存到服务端了', resp.ok && String(resp.headers.get('content-type')).indexOf('image/png') === 0,
+                'HTTP ' + resp.status + ' ' + resp.headers.get('content-type'));
+
+              /* 自检不该在别人的库里留垃圾：验完就把这张图删掉（还没被任何笔记引用） */
+              var attId = mark[1].split('/').pop();
+              var del = await win.fetch('/api/attachments/' + attId, { method: 'DELETE' });
+              log('自检用过的图片能自己清理掉', del.ok, 'HTTP ' + del.status);
+            }
+
+            await sleep(900);
+            var pvImg = doc.querySelector('.preview-card .preview-body img');
+            log('预览卡片里能看到刚粘进来的图', !!pvImg, pvImg ? '' : '预览里没有 img');
+            if (pvImg) {
+              await sleep(300);
+              log('预览里的图片能真的加载出来', pvImg.naturalWidth > 0, 'naturalWidth=' + pvImg.naturalWidth);
+            }
+          } catch (e) {
+            log('模拟粘贴截图', false, e.message);
+          }
+          ta2.value = '';
+          ta2.dispatchEvent(new win.Event('input', { bubbles: true }));
+        } else {
+          log('记录台粘贴框存在（图文流程需要它）', false, '找不到 .capture-input');
+        }
+      /* ---------- 6. 大截图压缩（可选：SHRINK=1，会临时上传一张十几 MB 的图） ---------- */
+
+        /*
+         * 1×1 的小图走不到「缩小」那条路，所以这一段专门造一张 3000×2000 的图
+         * （长边超过 2200 就会触发等比缩小）。
+         * 用渐变打底 + 稀疏噪点：文件不大（传得快），但足以触发并验证缩放。
+         * 默认不跑：它会往库里临时塞一张图，只该在临时库上验证。
+         * 注意这里直接 await 应用自己的 uploadImage()，不要用「sleep 后轮询」——
+         * 无头浏览器的虚拟时间会让 sleep 瞬间跳过，根本等不到上传完成。
+         */
+        if (/(^|[?&])shrink=1/.test(location.search)) {
+          var mod = null;
+          try {
+            mod = await import('/js/images.js');
+          } catch (e) {
+            log('能加载图片模块 /js/images.js', false, e.message);
+          }
+          if (mod) {
+            log('能加载图片模块 /js/images.js', true);
+            try {
+              var W = 3000, H = 2000;
+              var cv = doc.createElement('canvas');
+              cv.width = W; cv.height = H;
+              var ctx = cv.getContext('2d');
+              var grad = ctx.createLinearGradient(0, 0, W, H);
+              grad.addColorStop(0, '#eef2ff');
+              grad.addColorStop(1, '#fdf2f8');
+              ctx.fillStyle = grad;
+              ctx.fillRect(0, 0, W, H);
+              ctx.fillStyle = '#1e293b';
+              ctx.font = '160px sans-serif';
+              ctx.fillText('调度流程图（很大的一张截图）', 80, 240);
+              // 稀疏噪点：让 PNG 别小到失真，但仍然可控
+              var imgData = ctx.getImageData(0, 0, W, H);
+              var buf = imgData.data;
+              for (var off = 0; off < buf.length; off += 65536) {
+                var chunk = buf.subarray(off, Math.min(off + 65536, buf.length));
+                if ((off / 65536) % 8 === 0) win.crypto.getRandomValues(chunk);
+              }
+              ctx.putImageData(imgData, 0, 0);
+
+              var bigBlob = await new Promise(function (r) { cv.toBlob(r, 'image/png'); });
+              log('造出一张超过 2200 长边的图', !!bigBlob,
+                bigBlob ? (bigBlob.size / 1024).toFixed(0) + 'KB ' + W + 'x' + H : '没造出来');
+
+              if (bigBlob) {
+                var t0 = win.performance.now();
+                var att = await mod.uploadImage(new win.File([bigBlob], '大截图.png', { type: 'image/png' }));
+                log('大截图能上传成功', !!att.id, att.id || '没有 id');
+                log('被判定为「已缩小」', att.shrunk === true, 'shrunk=' + att.shrunk);
+                log('长边被缩到 2200 以内', Math.max(att.width, att.height) <= 2200,
+                  att.width + 'x' + att.height + '（原图 ' + W + 'x' + H + '）');
+                log('等比缩放没有变形', Math.abs(att.width / att.height - W / H) < 0.01,
+                  (att.width / att.height).toFixed(3) + ' vs ' + (W / H).toFixed(3));
+                log('图片确实存到了服务端',
+                  (await win.fetch(att.url)).status === 200);
+                var del2 = await win.fetch('/api/attachments/' + att.id, { method: 'DELETE' });
+                log('大图自检后已清理', del2.ok, 'HTTP ' + del2.status);
+                log('整条链路耗时可接受', win.performance.now() - t0 < 15000,
+                  Math.round(win.performance.now() - t0) + 'ms');
+              }
+            } catch (e) {
+              log('大截图压缩探测', false, e.message);
+            }
+          }
+        }
+      } catch (e) {
+        log('探测过程中出错', false, e.message);
+      }
+
+      finish();
+    }, 1800);
+
+    function finish() {
+      document.getElementById('probe').textContent =
+        '===== RESULT =====\n' + results.join('\n') + '\n===== END =====';
+    }
+  });
+})();
+</script>
+</body>
+</html>

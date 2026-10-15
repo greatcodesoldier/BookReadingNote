@@ -1,0 +1,19 @@
+{
+  "name": "reading-notes",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "读书笔记管理系统 · 零依赖本地知识库（粘贴即存 / 主题+时间标签 / 检索 / 主题分析 / 生成读书笔记）",
+  "scripts": {
+    "start": "node --no-warnings src/index.js",
+    "open": "node --no-warnings scripts/launch.mjs",
+    "dev": "node --no-warnings --watch src/index.js",
+    "test": "node --no-warnings test/smoke.mjs",
+    "test:e2e": "node --no-warnings scripts/e2e.mjs",
+    "test:ui": "node --no-warnings scripts/ui-check.mjs",
+    "seed": "node --no-warnings scripts/seed.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}
